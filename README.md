@@ -1,14 +1,24 @@
 # FatSecret MCP Server
 
+> **Fork of [fcoury/fatsecret-mcp](https://github.com/fcoury/fatsecret-mcp)** — maintained fork with bug fixes and additional tools.
+
 A Model Context Protocol (MCP) server that provides access to the FatSecret nutrition database API with full 3-Legged OAuth authentication support.
+
+## Changes from Upstream
+
+- **Pagination fix for `get_user_food_entries`**: The original implementation silently returned at most 20 entries per day (the API default). This fork automatically paginates through all pages (50 entries/page) so days with many logged items return complete data.
+- **Date timezone fix**: Dates passed as `YYYY-MM-DD` are now parsed as local dates rather than UTC midnight, preventing off-by-one-day errors for users in UTC− timezones.
+- **New tool: `get_food_entries_month`**: Returns aggregated daily macro totals (calories, protein, carbs, fat) for an entire month in a single API call — ideal for weekly and monthly nutrition reviews.
+- **New tool: `delete_food_entry`**: Delete an incorrectly logged food diary entry by `food_entry_id`.
+- **New tool: `edit_food_entry`**: Edit an existing food diary entry — change serving size, quantity, or meal type.
 
 ## Features
 
 - **Complete OAuth 1.0a Implementation**: Full 3-legged OAuth flow for user authentication
 - **Food Database Access**: Search and retrieve detailed nutrition information
 - **Recipe Database**: Search for recipes and get detailed cooking instructions
-- **User Data Management**: Access user food diaries and add food entries
-- **Secure Credential Storage**: Encrypted storage of API credentials and tokens
+- **User Data Management**: Access user food diaries, add/edit/delete food entries, and get monthly summaries
+- **Secure Credential Storage**: Storage of API credentials and tokens in `~/.fatsecret-mcp-config.json`
 
 ## Getting Started
 
@@ -162,8 +172,12 @@ Once authenticated, you can use all available tools:
 #### User Data (Requires Authentication)
 
 - `get_user_profile`: Get the authenticated user's profile
-- `get_user_food_entries`: Get food diary entries for a specific date
+- `get_user_food_entries`: Get all food diary entries for a specific date (paginated)
+- `get_food_entries_month`: Get aggregated daily macro totals for an entire month
 - `add_food_entry`: Add a food entry to the user's diary
+- `edit_food_entry`: Edit an existing diary entry (serving, quantity, or meal type)
+- `delete_food_entry`: Delete a diary entry by `food_entry_id`
+- `get_weight_month`: Get weight entries for a specific month
 
 #### Utility
 
@@ -252,11 +266,19 @@ Get the authenticated user's profile information.
 
 #### `get_user_food_entries`
 
-Get user's food diary entries for a specific date.
+Get user's food diary entries for a specific date. Automatically paginates to return all entries regardless of how many were logged.
 
 **Parameters:**
 
 - `date` (string, optional): Date in YYYY-MM-DD format (default: today)
+
+#### `get_food_entries_month`
+
+Get aggregated daily nutrition totals (calories, protein, carbs, fat) for an entire month. Returns one summary row per logged day — ideal for weekly and monthly reviews without needing to query each day individually.
+
+**Parameters:**
+
+- `date` (string, optional): Any YYYY-MM-DD date in the desired month (default: current month)
 
 #### `add_food_entry`
 
@@ -269,6 +291,25 @@ Add a food entry to the user's diary.
 - `quantity` (number, required): Quantity of the serving
 - `mealType` (string, required): Meal type (breakfast, lunch, dinner, snack)
 - `date` (string, optional): Date in YYYY-MM-DD format (default: today)
+
+#### `edit_food_entry`
+
+Edit an existing food diary entry.
+
+**Parameters:**
+
+- `foodEntryId` (string, required): The `food_entry_id` of the entry to edit
+- `servingId` (string, optional): New serving ID
+- `numberOfUnits` (number, optional): New quantity
+- `meal` (string, optional): New meal type — breakfast, lunch, dinner, or other
+
+#### `delete_food_entry`
+
+Delete a food diary entry.
+
+**Parameters:**
+
+- `foodEntryId` (string, required): The `food_entry_id` of the entry to delete
 
 ## Example Workflow
 

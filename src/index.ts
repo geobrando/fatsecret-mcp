@@ -91,9 +91,15 @@ class FatSecretMCPServer {
 
   private dateToFatSecretFormat(dateString?: string): string {
     // Convert date to days since epoch (1970-01-01)
-    // If no date provided, use today
-    const date = dateString ? new Date(dateString) : new Date();
-    const epochStart = new Date('1970-01-01');
+    // Parse as local date components to avoid UTC offset shifting the day
+    let date: Date;
+    if (dateString) {
+      const [year, month, day] = dateString.split('-').map(Number);
+      date = new Date(year, month - 1, day);
+    } else {
+      date = new Date();
+    }
+    const epochStart = new Date(1970, 0, 1);
     const daysSinceEpoch = Math.floor((date.getTime() - epochStart.getTime()) / (1000 * 60 * 60 * 24));
     return daysSinceEpoch.toString();
   }
@@ -481,7 +487,7 @@ class FatSecretMCPServer {
           },
           {
             name: "get_user_food_entries",
-            description: "Get user's food diary entries for a specific date",
+            description: "Get user's food diary entries for a specific date. Automatically paginates to return all entries.",
             inputSchema: {
               type: "object",
               properties: {
@@ -490,6 +496,60 @@ class FatSecretMCPServer {
                   description: "Date in YYYY-MM-DD format (default: today)",
                 },
               },
+            },
+          },
+          {
+            name: "get_food_entries_month",
+            description: "Get aggregated daily nutrition totals (calories, protein, carbs, fat) for an entire month. Returns one summary per logged day — ideal for weekly/monthly reviews.",
+            inputSchema: {
+              type: "object",
+              properties: {
+                date: {
+                  type: "string",
+                  description: "Any YYYY-MM-DD date in the desired month (default: current month)",
+                },
+              },
+            },
+          },
+          {
+            name: "delete_food_entry",
+            description: "Delete a food diary entry by its food_entry_id",
+            inputSchema: {
+              type: "object",
+              properties: {
+                foodEntryId: {
+                  type: "string",
+                  description: "The food_entry_id of the entry to delete",
+                },
+              },
+              required: ["foodEntryId"],
+            },
+          },
+          {
+            name: "edit_food_entry",
+            description: "Edit an existing food diary entry (change serving, quantity, or meal type)",
+            inputSchema: {
+              type: "object",
+              properties: {
+                foodEntryId: {
+                  type: "string",
+                  description: "The food_entry_id of the entry to edit",
+                },
+                servingId: {
+                  type: "string",
+                  description: "New serving ID (optional)",
+                },
+                numberOfUnits: {
+                  type: "number",
+                  description: "New quantity/number of units (optional)",
+                },
+                meal: {
+                  type: "string",
+                  description: "New meal type: breakfast, lunch, dinner, or other (optional)",
+                  enum: ["breakfast", "lunch", "dinner", "other"],
+                },
+              },
+              required: ["foodEntryId"],
             },
           },
           {
@@ -576,6 +636,12 @@ class FatSecretMCPServer {
           return await this.handleCheckAuthStatus(request.params.arguments);
         case "get_weight_month":
           return await this.handleGetWeightMonth(request.params.arguments);
+        case "get_food_entries_month":
+          return await this.handleGetFoodEntriesMonth(request.params.arguments);
+        case "delete_food_entry":
+          return await this.handleDeleteFoodEntry(request.params.arguments);
+        case "edit_food_entry":
+          return await this.handleEditFoodEntry(request.params.arguments);
         default:
           throw new McpError(
             ErrorCode.MethodNotFound,
@@ -898,24 +964,41 @@ class FatSecretMCPServer {
 
     try {
       const date = this.dateToFatSecretFormat(args.date);
-      const params = {
-        method: "food_entries.get",
-        date: date,
-        format: "json",
-      };
+      const maxResults = 50; // API maximum per page
+      const allEntries: any[] = [];
+      let pageNumber = 0;
 
-      const response = await this.makeApiRequest(
-        "GET",
-        this.baseUrl,
-        params,
-        true,
-      );
+      while (true) {
+        const params: Record<string, string> = {
+          method: "food_entries.get",
+          date: date,
+          max_results: maxResults.toString(),
+          page_number: pageNumber.toString(),
+          format: "json",
+        };
+
+        const response = await this.makeApiRequest("GET", this.baseUrl, params, true);
+
+        const entries = response.food_entries?.food_entry;
+        if (!entries) break;
+
+        const batch = Array.isArray(entries) ? entries : [entries];
+        allEntries.push(...batch);
+
+        // If we got fewer than max_results, we're on the last page
+        if (batch.length < maxResults) break;
+        pageNumber++;
+      }
+
+      const result = allEntries.length > 0
+        ? { food_entries: { food_entry: allEntries } }
+        : { food_entries: {} };
 
       return {
         content: [
           {
             type: "text",
-            text: JSON.stringify(response, null, 2),
+            text: JSON.stringify(result, null, 2),
           },
         ],
       };
@@ -1036,6 +1119,116 @@ class FatSecretMCPServer {
       throw new McpError(
         ErrorCode.InternalError,
         `Failed to get weight entries for month: ${
+          error instanceof Error ? error.message : "Unknown error"
+        }`,
+      );
+    }
+  }
+
+  private async handleGetFoodEntriesMonth(args: any) {
+    if (!this.config.accessToken || !this.config.accessTokenSecret) {
+      throw new McpError(
+        ErrorCode.InvalidRequest,
+        "User authentication required. Please complete the OAuth flow first.",
+      );
+    }
+
+    try {
+      const date = this.dateToFatSecretFormat(args.date);
+      const params: Record<string, string> = {
+        method: "food_entries.get_month",
+        date: date,
+        format: "json",
+      };
+
+      const response = await this.makeApiRequest("GET", this.baseUrl, params, true);
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(response, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      throw new McpError(
+        ErrorCode.InternalError,
+        `Failed to get monthly food entries: ${
+          error instanceof Error ? error.message : "Unknown error"
+        }`,
+      );
+    }
+  }
+
+  private async handleDeleteFoodEntry(args: any) {
+    if (!this.config.accessToken || !this.config.accessTokenSecret) {
+      throw new McpError(
+        ErrorCode.InvalidRequest,
+        "User authentication required. Please complete the OAuth flow first.",
+      );
+    }
+
+    try {
+      const params: Record<string, string> = {
+        method: "food_entry.delete",
+        food_entry_id: args.foodEntryId,
+        format: "json",
+      };
+
+      const response = await this.makeApiRequest("POST", this.baseUrl, params, true);
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Food entry ${args.foodEntryId} deleted successfully.\n\n${JSON.stringify(response, null, 2)}`,
+          },
+        ],
+      };
+    } catch (error) {
+      throw new McpError(
+        ErrorCode.InternalError,
+        `Failed to delete food entry: ${
+          error instanceof Error ? error.message : "Unknown error"
+        }`,
+      );
+    }
+  }
+
+  private async handleEditFoodEntry(args: any) {
+    if (!this.config.accessToken || !this.config.accessTokenSecret) {
+      throw new McpError(
+        ErrorCode.InvalidRequest,
+        "User authentication required. Please complete the OAuth flow first.",
+      );
+    }
+
+    try {
+      const params: Record<string, string> = {
+        method: "food_entry.edit",
+        food_entry_id: args.foodEntryId,
+        format: "json",
+      };
+
+      if (args.servingId !== undefined) params.serving_id = args.servingId;
+      if (args.numberOfUnits !== undefined) params.number_of_units = args.numberOfUnits.toString();
+      if (args.meal !== undefined) params.meal = args.meal;
+
+      const response = await this.makeApiRequest("POST", this.baseUrl, params, true);
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Food entry ${args.foodEntryId} updated successfully.\n\n${JSON.stringify(response, null, 2)}`,
+          },
+        ],
+      };
+    } catch (error) {
+      throw new McpError(
+        ErrorCode.InternalError,
+        `Failed to edit food entry: ${
           error instanceof Error ? error.message : "Unknown error"
         }`,
       );
